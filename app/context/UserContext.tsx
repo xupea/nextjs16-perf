@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useState, ReactNode, useCallback, useEffect } from 'react';
 
 export interface User {
   id: string;
@@ -28,13 +28,31 @@ export function useUser() {
   return context;
 }
 
-interface UserProviderProps {
-  children: ReactNode;
-  initialUser?: User | null;
-}
+export function UserProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
 
-export function UserProvider({ children, initialUser = null }: UserProviderProps) {
-  const [user, setUser] = useState<User | null>(initialUser);
+  // 初始化时获取用户信息
+  useEffect(() => {
+    const validateSession = async () => {
+      try {
+        const response = await fetch('/api/auth/me', {
+          cache: 'no-store',
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.user) {
+            // 更新用户状态
+            setUser(data.user);
+          }
+        }
+      } catch (error) {
+        console.error('Error validating session:', error);
+      }
+    };
+
+    validateSession();
+  }, []);
 
   const login = useCallback((user: User) => {
     setUser(user);
