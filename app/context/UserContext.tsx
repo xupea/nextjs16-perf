@@ -28,11 +28,19 @@ export function useUser() {
   return context;
 }
 
-export function UserProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+interface UserProviderProps {
+  children: ReactNode;
+  initialUser?: User | null;
+}
+
+export function UserProvider({ children, initialUser = null }: UserProviderProps) {
+  const [user, setUser] = useState<User | null>(initialUser);
 
   // 初始化时获取用户信息
   useEffect(() => {
+    // 如果已经有初始用户信息，就不再从 API 获取
+    if (initialUser) return;
+
     const validateSession = async () => {
       try {
         const response = await fetch('/api/auth/me', {
@@ -52,7 +60,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
     };
 
     validateSession();
-  }, []);
+  }, [initialUser]);
 
   const login = useCallback((user: User) => {
     setUser(user);
