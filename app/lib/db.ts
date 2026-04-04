@@ -1,4 +1,4 @@
-import * as vercelEdgeConfig from '@vercel/edge-config';
+import { createClient } from '@vercel/edge-config';
 import bcrypt from 'bcryptjs';
 
 export interface User {
@@ -24,11 +24,10 @@ export interface Session {
 type StorageType = 'memory' | 'vercel' | 'cloudflare';
 
 // 获取存储类型
-const storageType: StorageType = (process.env.STORAGE_TYPE as StorageType) || 'memory';
+const storageType: StorageType = (process.env.STORAGE_TYPE as StorageType) || 'vercel';
 
 interface EdgeConfigStore {
   get<T = unknown>(key: string): Promise<T | undefined>;
-  set?(key: string, value: unknown): Promise<void>;
 }
 
 interface CloudflareKVNamespace {
@@ -84,6 +83,15 @@ class MemoryStorage {
     return user;
   }
 
+  async incrementUserBalance(id: string, amount: number): Promise<User | null> {
+    const user = this.store.users.find(existingUser => existingUser.id === id);
+    if (!user) return null;
+
+    user.balance += amount;
+    user.updatedAt = new Date();
+    return user;
+  }
+
   async createSession(userId: string): Promise<Session> {
     const session: Session = {
       id: generateId(),
@@ -112,11 +120,53 @@ class MemoryStorage {
 // Vercel 存储实现（使用 Edge Config）
 class VercelStorage {
   private edgeConfig: EdgeConfigStore;
+  private edgeConfigId: string;
+  private accessToken: string;
+  private teamId?: string;
 
   constructor() {
-    this.edgeConfig = vercelEdgeConfig as EdgeConfigStore;
-    if (typeof this.edgeConfig.get !== 'function' || typeof this.edgeConfig.set !== 'function') {
+    const connectionString = process.env.EDGE_CONFIG;
+    const edgeConfigId = process.env.EDGE_CONFIG_ID;
+    const accessToken = process.env.VERCEL_ACCESS_TOKEN;
+
+    if (!connectionString || !edgeConfigId || !accessToken) {
       throw new Error('Vercel Edge Config not configured');
+    }
+
+    this.edgeConfig = createClient(connectionString) as EdgeConfigStore;
+    this.edgeConfigId = edgeConfigId;
+    this.accessToken = accessToken;
+    this.teamId = process.env.VERCEL_TEAM_ID;
+  }
+
+  private async patchItems(
+    items: Array<{
+      operation: 'create' | 'update' | 'upsert' | 'delete';
+      key: string;
+      value?: unknown;
+    }>
+  ) {
+    const endpoint = new URL(
+      `https://api.vercel.com/v1/edge-config/${this.edgeConfigId}/items`
+    );
+
+    if (this.teamId) {
+      endpoint.searchParams.set('teamId', this.teamId);
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items }),
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`Edge Config PATCH failed: ${response.status} ${body}`);
     }
   }
 
@@ -156,12 +206,41 @@ class VercelStorage {
 
       const users = (await this.edgeConfig.get<User[]>('users')) || [];
       users.push(user);
-      await this.edgeConfig.set?.('users', users);
+      await this.patchItems([
+        {
+          operation: 'upsert',
+          key: 'users',
+          value: users,
+        },
+      ]);
 
       return user;
     } catch (error) {
       console.error('Error creating user:', error);
       throw error;
+    }
+  }
+
+  async incrementUserBalance(id: string, amount: number): Promise<User | null> {
+    try {
+      const users = (await this.edgeConfig.get<User[]>('users')) || [];
+      const user = users.find(existingUser => existingUser.id === id);
+      if (!user) return null;
+
+      user.balance += amount;
+      user.updatedAt = new Date();
+      await this.patchItems([
+        {
+          operation: 'upsert',
+          key: 'users',
+          value: users,
+        },
+      ]);
+
+      return user;
+    } catch (error) {
+      console.error('Error incrementing user balance:', error);
+      return null;
     }
   }
 
@@ -177,7 +256,13 @@ class VercelStorage {
 
       const sessions = (await this.edgeConfig.get<Session[]>('sessions')) || [];
       sessions.push(session);
-      await this.edgeConfig.set?.('sessions', sessions);
+      await this.patchItems([
+        {
+          operation: 'upsert',
+          key: 'sessions',
+          value: sessions,
+        },
+      ]);
 
       return session;
     } catch (error) {
@@ -204,7 +289,13 @@ class VercelStorage {
       const sessions = (await this.edgeConfig.get<Session[]>('sessions')) || [];
       const now = new Date();
       const validSessions = sessions.filter((s: Session) => new Date(s.expiresAt) > now);
-      await this.edgeConfig.set?.('sessions', validSessions);
+      await this.patchItems([
+        {
+          operation: 'upsert',
+          key: 'sessions',
+          value: validSessions,
+        },
+      ]);
     } catch (error) {
       console.error('Error cleaning up expired sessions:', error);
     }
@@ -275,6 +366,24 @@ class CloudflareStorage {
     } catch (error) {
       console.error('Error creating user:', error);
       throw error;
+    }
+  }
+
+  async incrementUserBalance(id: string, amount: number): Promise<User | null> {
+    try {
+      const usersJson = await this.kv.get('users');
+      const users = usersJson ? JSON.parse(usersJson) : [];
+      const user = users.find((existingUser: User) => existingUser.id === id) || null;
+      if (!user) return null;
+
+      user.balance += amount;
+      user.updatedAt = new Date();
+      await this.kv.put('users', JSON.stringify(users));
+
+      return user;
+    } catch (error) {
+      console.error('Error incrementing user balance:', error);
+      return null;
     }
   }
 
@@ -356,6 +465,7 @@ const db = {
   findUserByEmail: storage.findUserByEmail.bind(storage),
   findUserById: storage.findUserById.bind(storage),
   createUser: storage.createUser.bind(storage),
+  incrementUserBalance: storage.incrementUserBalance.bind(storage),
   verifyPassword: async (plainPassword: string, hashedPassword: string): Promise<boolean> => {
     return await bcrypt.compare(plainPassword, hashedPassword);
   },
