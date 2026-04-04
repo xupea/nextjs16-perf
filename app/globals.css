@@ -22,5 +22,68 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.glass-panel {
+  background: linear-gradient(180deg, rgb(15 23 42 / 0.72), rgb(2 6 23 / 0.78));
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow:
+    0 24px 80px rgb(15 23 42 / 0.45),
+    inset 0 1px 0 rgb(255 255 255 / 0.05);
+  backdrop-filter: blur(16px);
+}
+
+.game-chip {
+  border-radius: 9999px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.game-chip-emerald {
+  background: rgb(16 185 129 / 0.14);
+  color: rgb(167 243 208);
+}
+
+.game-chip-cyan {
+  background: rgb(34 211 238 / 0.14);
+  color: rgb(165 243 252);
+}
+
+.game-chip-amber {
+  background: rgb(251 191 36 / 0.14);
+  color: rgb(253 230 138);
+}
+
+.game-chip-rose {
+  background: rgb(244 63 94 / 0.14);
+  color: rgb(254 205 211);
+}
+
+.game-chip-sky {
+  background: rgb(14 165 233 / 0.14);
+  color: rgb(186 230 253);
+}
+
+.game-chip-violet {
+  background: rgb(139 92 246 / 0.14);
+  color: rgb(221 214 254);
+}
+
+.game-chip-lime {
+  background: rgb(132 204 22 / 0.14);
+  color: rgb(217 249 157);
+}
+
+.game-chip-orange {
+  background: rgb(249 115 22 / 0.14);
+  color: rgb(254 215 170);
 }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { unstable_rethrow } from 'next/navigation';
 import db from '@/app/lib/db';
 
 export async function GET(request: NextRequest) {
@@ -33,6 +34,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
+    unstable_rethrow(error);
     console.error('Session validation error:', error);
     return NextResponse.json({ user: null });
   }
