@@ -1,5 +1,6 @@
 import { headers } from 'next/headers';
 import { User } from '../context/UserContext';
+import db from '../lib/db';
 
 // 服务端函数，用于获取用户信息
 export async function getServerUser() {
@@ -15,18 +16,13 @@ export async function getServerUser() {
   if (!sessionCookie) return null;
 
   try {
-    // 调用 API 验证 session
-    const response = await fetch('/api/auth/me', {
-      headers: {
-        cookie: `session=${sessionCookie}`,
-      },
-      cache: 'no-store',
-    });
+    // 直接使用 db 对象验证 session
+    const session = await db.findSessionByToken(sessionCookie);
+    if (!session) return null;
 
-    if (!response.ok) return null;
-
-    const data = await response.json();
-    return data.user as User | null;
+    // 查找用户
+    const user = await db.findUserById(session.userId);
+    return user;
   } catch (error) {
     console.error('Error getting server user:', error);
     return null;
