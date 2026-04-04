@@ -4,7 +4,7 @@ This project is a Next.js 16 demo that combines a cached landing page and a logg
 
 ## Getting Started
 
-1. Copy env values and fill in your Vercel storage credentials.
+1. Copy env values and fill in your Neon connection string.
 2. Start the development server.
 
 ```bash
@@ -17,20 +17,17 @@ Open [http://localhost:3000](http://localhost:3000).
 
 Create `.env` from `.env.example` and set:
 
-- `STORAGE_TYPE=vercel`
-- `EDGE_CONFIG`
-- `EDGE_CONFIG_ID`
-- `VERCEL_ACCESS_TOKEN`
-- `VERCEL_TEAM_ID` if the Edge Config belongs to a team
+- `STORAGE_TYPE=neon`
+- `DATABASE_URL`
 
-If any of these are missing, the app falls back to in-memory storage.
+If `DATABASE_URL` is missing, the app falls back to in-memory storage.
 
 ## Storage Notes
 
-- Reads use the official `@vercel/edge-config` client.
-- Writes use the Vercel Edge Config REST API.
+- The app uses Neon Postgres via `@neondatabase/serverless`.
+- User and session data live in `users` and `sessions` tables.
+- The schema is created automatically on first access.
 - The session cookie is still the login source of truth.
-- The demo currently increments the balance by `+1` on each authenticated `/api/auth/me` request.
 
 ## Verification
 
@@ -41,5 +38,5 @@ npm run build
 
 ## References
 
-- [Vercel Edge Config API](https://vercel.com/docs/storage/edge-config/vercel-api)
+- [Neon serverless driver](https://neon.com/docs/serverless/serverless-driver)
 - [Next.js Cache Components](https://nextjs.org/docs/app/getting-started/caching)

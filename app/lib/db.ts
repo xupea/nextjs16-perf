@@ -1,4 +1,4 @@
-import { createClient } from '@vercel/edge-config';
+import { neon } from '@neondatabase/serverless';
 import bcrypt from 'bcryptjs';
 
 export interface User {
@@ -20,19 +20,25 @@ export interface Session {
   createdAt: Date;
 }
 
-// 存储类型
-type StorageType = 'memory' | 'vercel' | 'cloudflare';
+type StorageType = 'memory' | 'neon';
 
-// 获取存储类型
-const storageType: StorageType = (process.env.STORAGE_TYPE as StorageType) || 'vercel';
-
-interface EdgeConfigStore {
-  get<T = unknown>(key: string): Promise<T | undefined>;
+interface UserRow {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+  balance: string | number;
+  currency: string;
+  created_at: string | Date;
+  updated_at: string | Date;
 }
 
-interface CloudflareKVNamespace {
-  get(key: string): Promise<string | null>;
-  put(key: string, value: string): Promise<void>;
+interface SessionRow {
+  id: string;
+  token: string;
+  user_id: string;
+  expires_at: string | Date;
+  created_at: string | Date;
 }
 
 declare global {
@@ -42,15 +48,38 @@ declare global {
         sessions: Session[];
       }
     | undefined;
-  var MY_KV_NAMESPACE: CloudflareKVNamespace | undefined;
+  var __neonAuthSchemaReady: Promise<void> | undefined;
 }
 
-// 生成唯一 ID
+const storageType: StorageType = (process.env.STORAGE_TYPE as StorageType) || 'neon';
+
 function generateId(): string {
   return crypto.randomUUID();
 }
 
-// 内存存储实现
+function mapUser(row: UserRow): User {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    password: row.password,
+    balance: Number(row.balance),
+    currency: row.currency,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  };
+}
+
+function mapSession(row: SessionRow): Session {
+  return {
+    id: row.id,
+    token: row.token,
+    userId: row.user_id,
+    expiresAt: new Date(row.expires_at),
+    createdAt: new Date(row.created_at),
+  };
+}
+
 class MemoryStorage {
   private store =
     globalThis.__memoryAuthStore ??
@@ -74,7 +103,7 @@ class MemoryStorage {
       name,
       email,
       password: hashedPassword,
-      balance: 0.00,
+      balance: 0,
       currency: 'USD',
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -97,7 +126,7 @@ class MemoryStorage {
       id: generateId(),
       token: generateId(),
       userId,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24小时过期
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       createdAt: new Date(),
     };
     this.store.sessions.push(session);
@@ -105,7 +134,7 @@ class MemoryStorage {
   }
 
   async findSessionByToken(token: string): Promise<Session | null> {
-    const session = this.store.sessions.find(s => s.token === token);
+    const session = this.store.sessions.find(existingSession => existingSession.token === token);
     if (!session) return null;
     if (session.expiresAt < new Date()) return null;
     return session;
@@ -113,346 +142,158 @@ class MemoryStorage {
 
   async cleanupExpiredSessions() {
     const now = new Date();
-    this.store.sessions = this.store.sessions.filter(s => s.expiresAt > now);
+    this.store.sessions = this.store.sessions.filter(session => session.expiresAt > now);
   }
 }
 
-// Vercel 存储实现（使用 Edge Config）
-class VercelStorage {
-  private edgeConfig: EdgeConfigStore;
-  private edgeConfigId: string;
-  private accessToken: string;
-  private teamId?: string;
+class NeonStorage {
+  private sql;
+  private schemaReady: Promise<void>;
 
   constructor() {
-    const connectionString = process.env.EDGE_CONFIG;
-    const edgeConfigId = process.env.EDGE_CONFIG_ID;
-    const accessToken = process.env.VERCEL_ACCESS_TOKEN;
+    const databaseUrl = process.env.DATABASE_URL;
 
-    if (!connectionString || !edgeConfigId || !accessToken) {
-      throw new Error('Vercel Edge Config not configured');
+    if (!databaseUrl) {
+      throw new Error('Neon DATABASE_URL not configured');
     }
 
-    this.edgeConfig = createClient(connectionString) as EdgeConfigStore;
-    this.edgeConfigId = edgeConfigId;
-    this.accessToken = accessToken;
-    this.teamId = process.env.VERCEL_TEAM_ID;
-  }
-
-  private async patchItems(
-    items: Array<{
-      operation: 'create' | 'update' | 'upsert' | 'delete';
-      key: string;
-      value?: unknown;
-    }>
-  ) {
-    const endpoint = new URL(
-      `https://api.vercel.com/v1/edge-config/${this.edgeConfigId}/items`
-    );
-
-    if (this.teamId) {
-      endpoint.searchParams.set('teamId', this.teamId);
-    }
-
-    const response = await fetch(endpoint, {
-      method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json',
+    this.sql = neon(databaseUrl, {
+      fetchOptions: {
+        cache: 'no-store',
       },
-      body: JSON.stringify({ items }),
-      cache: 'no-store',
     });
+    this.schemaReady =
+      globalThis.__neonAuthSchemaReady ?? (globalThis.__neonAuthSchemaReady = this.initialize());
+  }
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Edge Config PATCH failed: ${response.status} ${body}`);
-    }
+  private async initialize() {
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        balance NUMERIC(18, 2) NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'USD',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await this.sql`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await this.sql`
+      CREATE INDEX IF NOT EXISTS sessions_token_idx ON sessions (token)
+    `;
   }
 
   async findUserByEmail(email: string): Promise<User | null> {
-    try {
-      const users = (await this.edgeConfig.get<User[]>('users')) || [];
-      return users.find((user: User) => user.email === email) || null;
-    } catch (error) {
-      console.error('Error finding user by email:', error);
-      return null;
-    }
+    await this.schemaReady;
+    const rows = (await this.sql`
+      SELECT id, name, email, password, balance, currency, created_at, updated_at
+      FROM users
+      WHERE email = ${email}
+      LIMIT 1
+    `) as UserRow[];
+
+    return rows[0] ? mapUser(rows[0]) : null;
   }
 
   async findUserById(id: string): Promise<User | null> {
-    try {
-      const users = (await this.edgeConfig.get<User[]>('users')) || [];
-      return users.find((user: User) => user.id === id) || null;
-    } catch (error) {
-      console.error('Error finding user by id:', error);
-      return null;
-    }
+    await this.schemaReady;
+    const rows = (await this.sql`
+      SELECT id, name, email, password, balance, currency, created_at, updated_at
+      FROM users
+      WHERE id = ${id}
+      LIMIT 1
+    `) as UserRow[];
+
+    return rows[0] ? mapUser(rows[0]) : null;
   }
 
   async createUser(name: string, email: string, password: string): Promise<User> {
-    try {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const user: User = {
-        id: generateId(),
-        name,
-        email,
-        password: hashedPassword,
-        balance: 0.00,
-        currency: 'USD',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+    await this.schemaReady;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const id = generateId();
 
-      const users = (await this.edgeConfig.get<User[]>('users')) || [];
-      users.push(user);
-      await this.patchItems([
-        {
-          operation: 'upsert',
-          key: 'users',
-          value: users,
-        },
-      ]);
+    const rows = (await this.sql`
+      INSERT INTO users (id, name, email, password, balance, currency, created_at, updated_at)
+      VALUES (${id}, ${name}, ${email}, ${hashedPassword}, ${0}, ${'USD'}, NOW(), NOW())
+      RETURNING id, name, email, password, balance, currency, created_at, updated_at
+    `) as UserRow[];
 
-      return user;
-    } catch (error) {
-      console.error('Error creating user:', error);
-      throw error;
-    }
+    return mapUser(rows[0]);
   }
 
   async incrementUserBalance(id: string, amount: number): Promise<User | null> {
-    try {
-      const users = (await this.edgeConfig.get<User[]>('users')) || [];
-      const user = users.find(existingUser => existingUser.id === id);
-      if (!user) return null;
+    await this.schemaReady;
+    const rows = (await this.sql`
+      UPDATE users
+      SET balance = balance + ${amount}, updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING id, name, email, password, balance, currency, created_at, updated_at
+    `) as UserRow[];
 
-      user.balance += amount;
-      user.updatedAt = new Date();
-      await this.patchItems([
-        {
-          operation: 'upsert',
-          key: 'users',
-          value: users,
-        },
-      ]);
-
-      return user;
-    } catch (error) {
-      console.error('Error incrementing user balance:', error);
-      return null;
-    }
+    return rows[0] ? mapUser(rows[0]) : null;
   }
 
   async createSession(userId: string): Promise<Session> {
-    try {
-      const session: Session = {
-        id: generateId(),
-        token: generateId(),
-        userId,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24小时过期
-        createdAt: new Date(),
-      };
+    await this.schemaReady;
+    const id = generateId();
+    const token = generateId();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-      const sessions = (await this.edgeConfig.get<Session[]>('sessions')) || [];
-      sessions.push(session);
-      await this.patchItems([
-        {
-          operation: 'upsert',
-          key: 'sessions',
-          value: sessions,
-        },
-      ]);
+    const rows = (await this.sql`
+      INSERT INTO sessions (id, token, user_id, expires_at, created_at)
+      VALUES (${id}, ${token}, ${userId}, ${expiresAt.toISOString()}, NOW())
+      RETURNING id, token, user_id, expires_at, created_at
+    `) as SessionRow[];
 
-      return session;
-    } catch (error) {
-      console.error('Error creating session:', error);
-      throw error;
-    }
+    return mapSession(rows[0]);
   }
 
   async findSessionByToken(token: string): Promise<Session | null> {
-    try {
-      const sessions = (await this.edgeConfig.get<Session[]>('sessions')) || [];
-      const session = sessions.find((s: Session) => s.token === token);
-      if (!session) return null;
-      if (new Date(session.expiresAt) < new Date()) return null;
-      return session;
-    } catch (error) {
-      console.error('Error finding session by token:', error);
-      return null;
-    }
+    await this.schemaReady;
+    const rows = (await this.sql`
+      SELECT id, token, user_id, expires_at, created_at
+      FROM sessions
+      WHERE token = ${token}
+        AND expires_at > NOW()
+      LIMIT 1
+    `) as SessionRow[];
+
+    return rows[0] ? mapSession(rows[0]) : null;
   }
 
   async cleanupExpiredSessions() {
-    try {
-      const sessions = (await this.edgeConfig.get<Session[]>('sessions')) || [];
-      const now = new Date();
-      const validSessions = sessions.filter((s: Session) => new Date(s.expiresAt) > now);
-      await this.patchItems([
-        {
-          operation: 'upsert',
-          key: 'sessions',
-          value: validSessions,
-        },
-      ]);
-    } catch (error) {
-      console.error('Error cleaning up expired sessions:', error);
-    }
+    await this.schemaReady;
+    await this.sql`
+      DELETE FROM sessions
+      WHERE expires_at <= NOW()
+    `;
   }
 }
 
-// Cloudflare 存储实现
-class CloudflareStorage {
-  private kv: CloudflareKVNamespace;
-
-  constructor() {
-    try {
-      // 尝试获取 Cloudflare KV
-      // 注意：在 Cloudflare Workers 环境中，KV 命名空间会通过环境变量或绑定提供
-      // 这里假设 KV 命名空间名为 'MY_KV_NAMESPACE'
-      this.kv = globalThis.MY_KV_NAMESPACE as CloudflareKVNamespace;
-      if (!this.kv) {
-        throw new Error('Cloudflare KV namespace not available');
-      }
-    } catch (error) {
-      console.error('Cloudflare KV not available:', error);
-      throw new Error('Cloudflare KV not configured');
-    }
-  }
-
-  async findUserByEmail(email: string): Promise<User | null> {
-    try {
-      const usersJson = await this.kv.get('users');
-      const users = usersJson ? JSON.parse(usersJson) : [];
-      return users.find((user: User) => user.email === email) || null;
-    } catch (error) {
-      console.error('Error finding user by email:', error);
-      return null;
-    }
-  }
-
-  async findUserById(id: string): Promise<User | null> {
-    try {
-      const usersJson = await this.kv.get('users');
-      const users = usersJson ? JSON.parse(usersJson) : [];
-      return users.find((user: User) => user.id === id) || null;
-    } catch (error) {
-      console.error('Error finding user by id:', error);
-      return null;
-    }
-  }
-
-  async createUser(name: string, email: string, password: string): Promise<User> {
-    try {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const user: User = {
-        id: generateId(),
-        name,
-        email,
-        password: hashedPassword,
-        balance: 0.00,
-        currency: 'USD',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-
-      const usersJson = await this.kv.get('users');
-      const users = usersJson ? JSON.parse(usersJson) : [];
-      users.push(user);
-      await this.kv.put('users', JSON.stringify(users));
-
-      return user;
-    } catch (error) {
-      console.error('Error creating user:', error);
-      throw error;
-    }
-  }
-
-  async incrementUserBalance(id: string, amount: number): Promise<User | null> {
-    try {
-      const usersJson = await this.kv.get('users');
-      const users = usersJson ? JSON.parse(usersJson) : [];
-      const user = users.find((existingUser: User) => existingUser.id === id) || null;
-      if (!user) return null;
-
-      user.balance += amount;
-      user.updatedAt = new Date();
-      await this.kv.put('users', JSON.stringify(users));
-
-      return user;
-    } catch (error) {
-      console.error('Error incrementing user balance:', error);
-      return null;
-    }
-  }
-
-  async createSession(userId: string): Promise<Session> {
-    try {
-      const session: Session = {
-        id: generateId(),
-        token: generateId(),
-        userId,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24小时过期
-        createdAt: new Date(),
-      };
-
-      const sessionsJson = await this.kv.get('sessions');
-      const sessions = sessionsJson ? JSON.parse(sessionsJson) : [];
-      sessions.push(session);
-      await this.kv.put('sessions', JSON.stringify(sessions));
-
-      return session;
-    } catch (error) {
-      console.error('Error creating session:', error);
-      throw error;
-    }
-  }
-
-  async findSessionByToken(token: string): Promise<Session | null> {
-    try {
-      const sessionsJson = await this.kv.get('sessions');
-      const sessions = sessionsJson ? JSON.parse(sessionsJson) : [];
-      const session = sessions.find((s: Session) => s.token === token);
-      if (!session) return null;
-      if (new Date(session.expiresAt) < new Date()) return null;
-      return session;
-    } catch (error) {
-      console.error('Error finding session by token:', error);
-      return null;
-    }
-  }
-
-  async cleanupExpiredSessions() {
-    try {
-      const sessionsJson = await this.kv.get('sessions');
-      const sessions = sessionsJson ? JSON.parse(sessionsJson) : [];
-      const now = new Date();
-      const validSessions = sessions.filter((s: Session) => new Date(s.expiresAt) > now);
-      await this.kv.put('sessions', JSON.stringify(validSessions));
-    } catch (error) {
-      console.error('Error cleaning up expired sessions:', error);
-    }
-  }
-}
-
-// 初始化存储
-let storage: MemoryStorage | VercelStorage | CloudflareStorage;
+let storage: MemoryStorage | NeonStorage;
 
 try {
   switch (storageType) {
-    case 'vercel':
-      storage = new VercelStorage();
-      console.log('Using Vercel storage');
-      break;
-    case 'cloudflare':
-      storage = new CloudflareStorage();
-      console.log('Using Cloudflare storage');
-      break;
     case 'memory':
-    default:
       storage = new MemoryStorage();
       console.log('Using memory storage');
+      break;
+    case 'neon':
+    default:
+      storage = new NeonStorage();
+      console.log('Using Neon storage');
       break;
   }
 } catch (error) {
@@ -460,14 +301,13 @@ try {
   storage = new MemoryStorage();
 }
 
-// 导出函数
 const db = {
   findUserByEmail: storage.findUserByEmail.bind(storage),
   findUserById: storage.findUserById.bind(storage),
   createUser: storage.createUser.bind(storage),
   incrementUserBalance: storage.incrementUserBalance.bind(storage),
   verifyPassword: async (plainPassword: string, hashedPassword: string): Promise<boolean> => {
-    return await bcrypt.compare(plainPassword, hashedPassword);
+    return bcrypt.compare(plainPassword, hashedPassword);
   },
   createSession: storage.createSession.bind(storage),
   findSessionByToken: storage.findSessionByToken.bind(storage),
