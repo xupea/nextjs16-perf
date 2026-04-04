@@ -6,6 +6,7 @@ import {
   FormEvent,
   ReactNode,
   startTransition,
+  useEffect,
   useState,
   useTransition,
 } from "react";
@@ -66,11 +67,58 @@ export default function HomeShell({
   const [view, setView] = useState<HomeView>(
     initialUser ? "lobby" : initialView
   );
+  const [isRefreshingUser, setIsRefreshingUser] = useState(false);
   const [isPending, startUiTransition] = useTransition();
 
   const openLogin = () => setAuthMode("login");
   const openRegister = () => setAuthMode("register");
   const closeAuth = () => setAuthMode(null);
+
+  useEffect(() => {
+    if (view !== "lobby") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshUser = async () => {
+      setIsRefreshingUser(true);
+
+      try {
+        const response = await fetch("/api/auth/me", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data = (await response.json()) as { user: AuthUser | null };
+        if (cancelled) {
+          return;
+        }
+
+        if (data.user) {
+          setUser(data.user);
+          setView("lobby");
+        } else {
+          setUser(null);
+          setView("guest");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsRefreshingUser(false);
+        }
+      }
+    };
+
+    void refreshUser();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [view]);
 
   async function handleAuthSuccess(nextUser: AuthUser) {
     setUser(nextUser);
@@ -131,8 +179,14 @@ export default function HomeShell({
                   onClick={() => setIsBalanceOpen((current) => !current)}
                   className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/15"
                 >
-                  {getCurrencySymbol(user.currency)}
-                  {user.balance.toFixed(2)} v
+                  {isRefreshingUser ? (
+                    "Loading..."
+                  ) : (
+                    <>
+                      {getCurrencySymbol(user.currency)}
+                      {user.balance.toFixed(2)} v
+                    </>
+                  )}
                 </button>
                 {isBalanceOpen ? (
                   <div className="absolute right-0 top-[calc(100%+0.75rem)] min-w-52 rounded-3xl border border-white/10 bg-slate-950/95 p-3 shadow-2xl">
@@ -142,8 +196,14 @@ export default function HomeShell({
                     <div className="rounded-2xl border border-white/8 bg-white/3 px-3 py-3">
                       <p className="text-sm text-slate-400">{user.currency} wallet</p>
                       <p className="mt-1 text-xl font-bold text-white">
-                        {getCurrencySymbol(user.currency)}
-                        {user.balance.toFixed(2)}
+                        {isRefreshingUser ? (
+                          "Loading..."
+                        ) : (
+                          <>
+                            {getCurrencySymbol(user.currency)}
+                            {user.balance.toFixed(2)}
+                          </>
+                        )}
                       </p>
                     </div>
                     <button
