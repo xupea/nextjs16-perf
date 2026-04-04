@@ -3,8 +3,17 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useUser } from '../context/UserContext';
+import { UserProvider } from '../context/UserContext';
 
 export default function LoginPage() {
+  return (
+    <UserProvider initialUser={null}>
+      <LoginContent />
+    </UserProvider>
+  );
+}
+
+function LoginContent() {
   const router = useRouter();
   const { login } = useUser();
   const [email, setEmail] = useState('');
