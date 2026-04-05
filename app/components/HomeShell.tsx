@@ -75,10 +75,6 @@ export default function HomeShell({
   const closeAuth = () => setAuthMode(null);
 
   useEffect(() => {
-    if (view !== "lobby") {
-      return;
-    }
-
     let cancelled = false;
 
     const refreshUser = async () => {
@@ -106,6 +102,11 @@ export default function HomeShell({
           setUser(null);
           setView("guest");
         }
+      } catch {
+        if (!cancelled) {
+          setUser(null);
+          setView("guest");
+        }
       } finally {
         if (!cancelled) {
           setIsRefreshingUser(false);
@@ -118,7 +119,7 @@ export default function HomeShell({
     return () => {
       cancelled = true;
     };
-  }, [view]);
+  }, []);
 
   async function handleAuthSuccess(nextUser: AuthUser) {
     setUser(nextUser);
